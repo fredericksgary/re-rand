@@ -12,14 +12,9 @@
 ;; functions.
 
 (ns re-rand.parser.rules
-  (:refer-clojure :exclude [rand-int rand-nth])
   (:require [clojure.set :refer [difference]]
-            [four.stateful :refer [rand-int rand-nth]]
+            [clojure.test.check.generators :as gen]
             [re-rand.parser.tools :refer :all]))
-
-(defn rnd-seq
-  [f min max]
-  (repeatedly (+ (rand-int (- (inc max) min)) min) f))
 
 (defn parse-int
   [n]
@@ -82,23 +77,23 @@
     (match #"\\(.)")
     (fn [[_ char]]
       (cond
-        (= char "d") #(rand-nth digits)
-        (= char "s") #(rand-nth whitespace)
-        (= char "w") #(rand-nth alphanumeric)
-        (= char "D") #(rand-nth (invert digits))
-        (= char "S") #(rand-nth (invert whitespace))
-        (= char "W") #(rand-nth (invert alphanumeric))
-        :otherwise    (constantly char)))))
+        (= char "d") (gen/elements digits)
+        (= char "s") (gen/elements whitespace)
+        (= char "w") (gen/elements alphanumeric)
+        (= char "D") (gen/elements (invert digits))
+        (= char "S") (gen/elements (invert whitespace))
+        (= char "W") (gen/elements (invert alphanumeric))
+        :otherwise   (gen/return char)))))
 
 (def literal
   (attach
     (match #"[^\\{}.+*()\[\]^$]")
-    constantly))
+    gen/return))
 
 (def any-char
   (attach
     (match #"\.")
-    (fn [_] #(rand-nth valid-any-chars))))
+    (fn [_] (gen/elements valid-any-chars))))
 
 (defn sequence-of-chars
   [src]
@@ -128,7 +123,7 @@
       (match #"\]"))
     (fn [[_ invert? char-groups _]]
       (let [chars (get-char-list char-groups (seq invert?))]
-        #(rand-nth chars)))))
+        (gen/elements chars)))))
 
 (declare pattern)
 
@@ -138,9 +133,7 @@
       (match #"\(")
       (forward pattern)
       (match #"\)"))
-    (fn [[_ f _]]
-      #(let [s (f)]
-         (apply vector (first s) s)))))
+    (fn [[_ f _]] f)))
 
 (def single
   (choice escaped
@@ -156,29 +149,36 @@
 (def zero-or-more
   (attach
     (series single (match #"\*"))
-    (fn [[f _]] #(combine-many (rnd-seq f 0 repeat-limit)))))
+    (fn [[f _]]
+      (gen/fmap #(apply str %) (gen/list f)))))
 
 (def one-or-more
   (attach
-    (series single (match #"\+"))
-    (fn [[f _]] #(combine-many (rnd-seq f 1 repeat-limit)))))
+   (series single (match #"\+"))
+   (fn [[f _]]
+     (gen/fmap #(apply str %)
+               (gen/such-that not-empty (gen/list f))))))
 
 (def zero-or-one
   (attach
     (series single (match #"\?"))
-    (fn [[f _]] #(combine-many (rnd-seq f 0 1)))))
+    (fn [[f _]] (gen/fmap #(apply str %) (gen/vector f 0 1)))))
 
 (def exactly-n
   (attach
     (series single (match #"\{(\d+)\}"))
-    (fn [[f [_ n]]]
-      #(combine-many (repeatedly (parse-int n) f)))))
+    (fn [[f [_ n]]] (gen/fmap #(apply str %) (gen/vector f n)))))
 
 (def between-n-and-m
   (attach
     (series single (match #"\{(\d+),\s*(\d+)\}"))
-    (fn [[f [_ n m]]]
-      #(combine-many (rnd-seq f (parse-int n) (parse-int m))))))
+    (fn [[f [_ n m]]] (gen/fmap #(apply str %) (gen/vector f n m)))))
+
+(def pipe
+  (attach
+   (series single (match #"\|") single)
+   (fn [[left _pipe right]]
+     (gen/one-of [left right]))))
 
 (def pattern
   (attach
@@ -188,6 +188,7 @@
               zero-or-one
               exactly-n
               between-n-and-m
+              pipe
               single))
     (fn [fs]
-      #(combine-groups into (map (fn [f] (f)) fs)))))
+      (gen/fmap #(apply str %) (apply gen/tuple fs)))))
